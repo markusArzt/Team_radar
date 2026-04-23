@@ -413,13 +413,24 @@ async function doSubmit() {
 }
 
 
+let pollTimer = null;
+
+function startPolling() {
+  stopPolling();
+  pollTimer = setInterval(refreshResults, 5000);
+}
+
+function stopPolling() {
+  if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+}
+
 async function renderResults() {
   const area = document.getElementById('results-area');
   if (!cfg.binId) {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>';
     return;
   }
-  // Show cached data + loading indicator while fetching
+  // Show cached data instantly while fetching
   const cached = LS.get('radar_cache');
   if (cached && cached.responses && cached.responses.length) {
     renderResultsData(cached.responses, calcAvgsFrom(cached.responses), area, true);
@@ -427,12 +438,12 @@ async function renderResults() {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>';
   }
   await refreshResults();
+  startPolling();
 }
 
 async function refreshResults() {
   const area = document.getElementById('results-area');
   if (!area || !cfg.binId) return;
-  // Disable the refresh button while loading
   const btn = area.querySelector('#btn-refresh');
   if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
   try {
@@ -441,10 +452,9 @@ async function refreshResults() {
     LS.set('radar_cache', { responses, _ts: Date.now() });
     renderResultsData(responses, calcAvgsFrom(responses), area, false);
   } catch(e) {
-    // Re-enable button on error
     const btn2 = area.querySelector('#btn-refresh');
     if (btn2) { btn2.disabled = false; btn2.textContent = 'Refresh'; }
-    toast('Could not reach server — check your connection');
+    toast('Could not reach server');
   }
 }
 
@@ -532,19 +542,80 @@ function showResultOverlay(myE, teamAvgs) {
     <div class="overlay-sheet">
       <div class="overlay-handle"></div>
       <div class="overlay-title">Your result</div>
-      <div class="overlay-sub">${hasTeam?`Your scores vs team average (${teamOv.toFixed(1)} / ${cfg.maxVal})`:'Your scores — loading team average…'}</div>
-      <div class="legend">
+      <div class="overlay-sub" id="overlay-sub">${hasTeam?`Your scores vs team average (${teamOv.toFixed(1)} / ${cfg.maxVal})`:'Your scores — tap Refresh to load team average'}</div>
+      <div class="legend" id="overlay-legend">
         <div class="legend-item"><div class="legend-dot" style="background:#7F77DD"></div>You (${myOv.toFixed(1)})</div>
         ${hasTeam?`<div class="legend-item"><div class="legend-dot" style="background:#E8A838"></div>Team avg (${teamOv.toFixed(1)})</div>`:''}
       </div>
-      <div class="radar-wrap">${drawRadarDual(myE, teamAvgs)}</div>
-      <div style="margin-top:1.25rem">${rows}</div>
-      <button class="btn-primary" style="margin-top:1.5rem" id="btn-close-overlay">Close</button>
+      <div class="radar-wrap" id="overlay-radar">${drawRadarDual(myE, teamAvgs)}</div>
+      <div style="margin-top:1.25rem" id="overlay-rows">${rows}</div>
+      <div style="display:flex;gap:10px;margin-top:1.5rem">
+        <button class="btn" id="btn-overlay-refresh" style="flex:1">Refresh team avg</button>
+        <button class="btn-primary" style="margin-top:0;flex:1" id="btn-close-overlay">Close</button>
+      </div>
     </div></div>`;
   el.style.display = 'block';
   document.getElementById('btn-close-overlay').addEventListener('click', closeOverlay);
   document.getElementById('overlay-bg').addEventListener('click', e => { if(e.target===e.currentTarget) closeOverlay(); });
+  document.getElementById('btn-overlay-refresh').addEventListener('click', () => refreshOverlay(myE));
 }
+
+async function refreshOverlay(myE) {
+  const btn = document.getElementById('btn-overlay-refresh');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try {
+    const data = await readBin();
+    const responses = data.responses || [];
+    LS.set('radar_cache', { responses, _ts: Date.now() });
+    const teamAvgs = calcAvgsFrom(responses);
+    const hasTeam  = Object.keys(teamAvgs).length > 0;
+    const myOv     = cfg.dims.reduce((s,d)=>s+(myE[d]||0),0) / cfg.dims.length;
+    const teamOv   = hasTeam ? cfg.dims.reduce((s,d)=>s+(teamAvgs[d]||0),0)/cfg.dims.length : null;
+
+    // Update sub-title
+    const sub = document.getElementById('overlay-sub');
+    if (sub) sub.textContent = hasTeam ? `Your scores vs team average (${teamOv.toFixed(1)} / ${cfg.maxVal})` : 'No responses yet';
+
+    // Update legend
+    const legend = document.getElementById('overlay-legend');
+    if (legend) legend.innerHTML =
+      `<div class="legend-item"><div class="legend-dot" style="background:#7F77DD"></div>You (${myOv.toFixed(1)})</div>` +
+      (hasTeam ? `<div class="legend-item"><div class="legend-dot" style="background:#E8A838"></div>Team avg (${teamOv.toFixed(1)})</div>` : '');
+
+    // Update radar
+    const radar = document.getElementById('overlay-radar');
+    if (radar) radar.innerHTML = drawRadarDual(myE, teamAvgs);
+
+    // Update rows
+    const rowsEl = document.getElementById('overlay-rows');
+    if (rowsEl) {
+      const newRows = cfg.dims.map(d => {
+        const mine  = myE[d]||0;
+        const team  = hasTeam ? (teamAvgs[d]||0) : null;
+        const delta = team!==null ? mine-team : 0;
+        const badge = team!==null
+          ? `<span class="delta-badge ${delta>0.4?'delta-pos':delta<-0.4?'delta-neg':'delta-neu'}">${delta>0?'+':''}${delta.toFixed(1)}</span>`
+          : '';
+        return `<div class="compare-row">
+          <div class="compare-label" title="${d}">${d}</div>
+          <div class="compare-bars">
+            <div class="compare-bar" style="width:${(mine/cfg.maxVal)*100}%;background:#7F77DD"></div>
+            ${team!==null?`<div class="compare-bar" style="width:${(team/cfg.maxVal)*100}%;background:#E8A838;opacity:0.85"></div>`:''}
+          </div>
+          <div class="compare-nums">
+            <div class="compare-num" style="color:#7F77DD">${mine}</div>
+            ${team!==null?`<div class="compare-num" style="color:#BA7517">${team.toFixed(1)}</div>`:''}
+          </div>${badge}</div>`;
+      }).join('');
+      rowsEl.innerHTML = newRows;
+    }
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh team avg'; }
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh team avg'; }
+    toast('Could not reach server');
+  }
+}
+
 function closeOverlay() { document.getElementById('result-overlay').style.display='none'; }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -617,6 +688,7 @@ function switchTab(name) {
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.getElementById('view-'+name).classList.add('active');
   if (name==='results') renderResults();
+  else stopPolling();
   if (name==='qr')     renderQR();
   if (name==='submit') renderSubmit();
 }
