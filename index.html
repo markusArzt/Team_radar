@@ -124,17 +124,15 @@
   <!-- SETUP -->
   <div class="view active" id="view-setup">
     <div class="bin-setup">
-      <p><strong>One-time setup:</strong> Responses are stored in JSONBin — a free service. Create one bin to get started.</p>
+      <p><strong>One-time setup:</strong> Responses are stored in a Google Sheet via Apps Script — free, fast, no rate limits.</p>
       <div class="steps">
-        <div class="step">Go to <a href="https://jsonbin.io" target="_blank">jsonbin.io</a> → Sign up free → Create a new bin with content <code>{"responses":[]}</code></div>
-        <div class="step">Copy your <strong>Bin ID</strong> and <strong>Master API key</strong> from the dashboard</div>
-        <div class="step">Paste them below and save</div>
+        <div class="step">Open <a href="https://script.google.com" target="_blank">script.google.com</a> → New project → paste the contents of <strong>team-radar-script.gs</strong></div>
+        <div class="step">Click <strong>Deploy → New deployment</strong> → Type: Web app → Execute as: Me → Who has access: Anyone → Deploy</div>
+        <div class="step">Copy the <strong>Web app URL</strong> and paste it below</div>
       </div>
-      <div style="display:grid;gap:8px;margin-top:0.75rem">
-        <div><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">Bin ID</label>
-          <input class="input" id="cfg-bin-id" placeholder="64abc123…"></div>
-        <div><label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">API Key</label>
-          <input class="input" id="cfg-api-key" placeholder="$2b$10$…" type="password"></div>
+      <div style="margin-top:0.75rem">
+        <label style="font-size:12px;color:var(--text-muted);display:block;margin-bottom:4px">Web app URL</label>
+        <input class="input" id="cfg-url" placeholder="https://script.google.com/macros/s/…/exec">
       </div>
     </div>
     <div class="section-label">Radar dimensions</div>
@@ -151,7 +149,7 @@
         <select class="input" id="max-val"><option>5</option><option selected>10</option></select></div>
     </div>
     <button class="btn-primary" id="save-btn" onclick="saveSetup()">Save & generate QR →</button>
-    <button class="btn" id="init-btn" onclick="initBin()" style="width:100%;margin-top:0.75rem;display:block;text-align:center">Initialise bin (clear &amp; prepare for new session)</button>
+    <button class="btn" id="init-btn" onclick="initSheet()" style="width:100%;margin-top:0.75rem;display:block;text-align:center">Clear all responses (prepare for new session)</button>
   </div>
 
   <!-- QR -->
@@ -206,7 +204,7 @@ const LS = {
 // CONFIG
 // ═══════════════════════════════════════════════════════════════════
 let cfg = LS.get('radar_cfg') || {
-  binId: '', apiKey: '',
+  url: '',
   dims: ['Collaboration','Clarity','Speed','Quality','Wellbeing'],
   minLabel: 'Low', maxLabel: 'High', maxVal: 10
 };
@@ -219,24 +217,30 @@ let submitState = 'idle';
 let myEntry     = null;
 
 // ═══════════════════════════════════════════════════════════════════
-// JSONBIN
+// GOOGLE APPS SCRIPT API
+// GET  → returns { responses: [...] }
+// POST → appends one response entry; body is the entry object
+//        body { action:'clear' } wipes all responses
 // ═══════════════════════════════════════════════════════════════════
 async function readBin() {
-  const r = await fetch(`https://api.jsonbin.io/v3/b/${cfg.binId}/latest`, {
-    headers: { 'X-Master-Key': cfg.apiKey }
-  });
+  const r = await fetch(cfg.url);
   if (!r.ok) throw new Error('HTTP ' + r.status);
-  return (await r.json()).record;
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'Script error');
+  return j; // { responses: [...] }
 }
 
-async function writeBin(data) {
-  const r = await fetch(`https://api.jsonbin.io/v3/b/${cfg.binId}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json', 'X-Master-Key': cfg.apiKey },
-    body: JSON.stringify(data)
+async function writeBin(entry) {
+  // entry is a single response object (or { action:'clear' })
+  const r = await fetch(cfg.url, {
+    method: 'POST',
+    body: JSON.stringify(entry)
   });
+  // Apps Script redirects POST to a new URL — follow it
   if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'Script error');
+  return j;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -247,8 +251,7 @@ function renderDims() {
     `<div class="dim-chip"><span>${d}</span>
       <button class="remove-btn" onclick="removeDim(${i})">×</button></div>`
   ).join('');
-  document.getElementById('cfg-bin-id').value  = cfg.binId    || '';
-  document.getElementById('cfg-api-key').value = cfg.apiKey   || '';
+  document.getElementById('cfg-url').value     = cfg.url      || '';
   document.getElementById('min-label').value   = cfg.minLabel;
   document.getElementById('max-label').value   = cfg.maxLabel;
   document.getElementById('max-val').value     = cfg.maxVal;
@@ -262,34 +265,33 @@ function addDim() {
 function removeDim(i) { cfg.dims.splice(i,1); renderDims(); }
 
 async function saveSetup() {
-  cfg.binId    = document.getElementById('cfg-bin-id').value.trim();
-  cfg.apiKey   = document.getElementById('cfg-api-key').value.trim();
+  cfg.url      = document.getElementById('cfg-url').value.trim();
   cfg.minLabel = document.getElementById('min-label').value || 'Low';
   cfg.maxLabel = document.getElementById('max-label').value || 'High';
   cfg.maxVal   = parseInt(document.getElementById('max-val').value);
-  if (!cfg.binId || !cfg.apiKey) { toast('Please enter Bin ID and API key'); return; }
+  if (!cfg.url) { toast('Please enter the Web app URL'); return; }
   const btn = document.getElementById('save-btn');
   btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Checking…';
   try {
     await readBin();
     LS.set('radar_cfg', cfg);
-    toast('Saved!'); renderQR(); renderSubmit(); switchTab('qr');
-  } catch(e) { toast('Could not connect — check credentials'); }
+    toast('Connected!'); renderQR(); renderSubmit(); switchTab('qr');
+  } catch(e) { toast('Could not connect — check the URL'); }
   btn.disabled = false; btn.innerHTML = 'Save & generate QR →';
 }
 
-async function initBin() {
-  cfg.binId  = document.getElementById('cfg-bin-id').value.trim();
-  cfg.apiKey = document.getElementById('cfg-api-key').value.trim();
-  if (!cfg.binId || !cfg.apiKey) { toast('Please enter Bin ID and API key first'); return; }
+async function initSheet() {
+  cfg.url = document.getElementById('cfg-url').value.trim() || cfg.url;
+  if (!cfg.url) { toast('Please enter the Web app URL first'); return; }
+  if (!confirm('Clear all responses from the sheet? Cannot be undone.')) return;
   const btn = document.getElementById('init-btn');
-  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Initialising…';
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Clearing…';
   try {
-    await writeBin({ responses: [] });
+    await writeBin({ action: 'clear' });
     LS.del('radar_cache');
-    toast('Bin initialised — ready for submissions');
-  } catch(e) { toast('Could not reach bin — check credentials'); }
-  btn.disabled = false; btn.innerHTML = 'Initialise bin';
+    toast('Sheet cleared — ready for new session');
+  } catch(e) { toast('Could not reach script — check the URL'); }
+  btn.disabled = false; btn.innerHTML = 'Clear all responses (prepare for new session)';
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -299,8 +301,7 @@ function getSubmitUrl() {
   const base = window.location.href.split('?')[0].split('#')[0];
   return base
     + '?tab=submit'
-    + '&bin='    + encodeURIComponent(cfg.binId)
-    + '&key='    + encodeURIComponent(cfg.apiKey)
+    + '&url='    + encodeURIComponent(cfg.url)
     + '&dims='   + encodeURIComponent(cfg.dims.join('|'))
     + '&min='    + encodeURIComponent(cfg.minLabel)
     + '&max='    + encodeURIComponent(cfg.maxLabel)
@@ -326,7 +327,7 @@ function downloadQR() {
 // ═══════════════════════════════════════════════════════════════════
 function renderSubmit() {
   const area = document.getElementById('submit-area');
-  if (!cfg.binId) {
+  if (!cfg.url) {
     area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>`;
     return;
   }
@@ -396,13 +397,13 @@ async function doSubmit() {
   submitState = 'syncing';
   renderSubmit();
 
-  // Use local cache as base — avoids slow readBin() on every submit.
-  // The bin is pre-initialised via "Initialise bin" in Setup.
+  // Append to local cache immediately
   const local = LS.get('radar_cache') || { responses: [] };
-  let finalResponses = [...local.responses, entry];
+  const finalResponses = [...local.responses, entry];
   LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
   try {
-    await writeBin({ responses: finalResponses });
+    // POST just the single entry — Apps Script appends it server-side
+    await writeBin(entry);
   } catch(e) {
     toast('Saved locally — could not reach server');
   }
@@ -426,7 +427,7 @@ function stopPolling() {
 
 async function renderResults() {
   const area = document.getElementById('results-area');
-  if (!cfg.binId) {
+  if (!cfg.url) {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>';
     return;
   }
@@ -443,7 +444,7 @@ async function renderResults() {
 
 async function refreshResults() {
   const area = document.getElementById('results-area');
-  if (!area || !cfg.binId) return;
+  if (!area || !cfg.url) return;
   const btn = area.querySelector('#btn-refresh');
   if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
   try {
@@ -502,11 +503,11 @@ function renderResultsData(responses, avgs, area, isLoading) {
 async function clearResponses() {
   if (!confirm('Clear all responses? Cannot be undone.')) return;
   try {
-    await writeBin({ responses: [] });
+    await writeBin({ action: 'clear' });
     LS.del('radar_cache');
     toast('Cleared');
     const area = document.getElementById('results-area');
-    if (area) renderResultsData([], {}, area);
+    if (area) renderResultsData([], {}, area, false);
   } catch(e) { toast('Error clearing — try again'); }
 }
 
@@ -698,9 +699,8 @@ function switchTab(name) {
 // ═══════════════════════════════════════════════════════════════════
 function bootstrapFromUrl() {
   const p = new URLSearchParams(window.location.search);
-  if (p.get('bin')) {
-    cfg.binId    = p.get('bin');
-    cfg.apiKey   = p.get('key')    || cfg.apiKey;
+  if (p.get('url')) {
+    cfg.url      = decodeURIComponent(p.get('url'));
     cfg.dims     = p.get('dims')   ? decodeURIComponent(p.get('dims')).split('|') : cfg.dims;
     cfg.minLabel = p.get('min')    ? decodeURIComponent(p.get('min'))  : cfg.minLabel;
     cfg.maxLabel = p.get('max')    ? decodeURIComponent(p.get('max'))  : cfg.maxLabel;
@@ -754,7 +754,7 @@ async function runTests() {
   submitState = savedState;
 
   // ── renderSubmit states ────────────────────────────────────────
-  if (cfg.binId) {
+  if (cfg.url) {
     submitState = 'idle';    renderSubmit();
     ok('renderSubmit idle: shows btn-submit',   !!document.getElementById('btn-submit'));
     ok('renderSubmit idle: no btn-again',       !document.getElementById('btn-again'));
@@ -778,7 +778,7 @@ async function runTests() {
     submitState = 'idle'; renderSubmit();
   } else {
     ['renderSubmit idle','renderSubmit syncing','renderSubmit done','btn-again'].forEach(n =>
-      results.push({ name: n+': (no binId — skipped)', pass: true, note:'skipped' }));
+      results.push({ name: n+': (no url configured — skipped)', pass: true, note:'skipped' }));
   }
 
   // ── drawRadar / drawRadarDual ──────────────────────────────────
@@ -823,7 +823,7 @@ async function runTests() {
     cfg.dims.every(d => mixAvg[d] !== undefined && !isNaN(mixAvg[d])));
 
   // ── Live JSONBin tests (only if credentials present) ──────────
-  if (cfg.binId && cfg.apiKey) {
+  if (cfg.url) {
     await okAsync('readBin: live read returns responses array', async () => {
       const d = await readBin();
       if (!Array.isArray(d.responses)) throw new Error('responses not array: ' + JSON.stringify(d));
@@ -840,7 +840,7 @@ async function runTests() {
       if (!found) throw new Error('marker not found after write');
     });
   } else {
-    results.push({ name:'readBin / writeBin live: skipped (no credentials)', pass:true, note:'skipped' });
+    results.push({ name:'readBin / writeBin live: skipped (no url configured)', pass:true, note:'skipped' });
   }
 
   // ── Render results ─────────────────────────────────────────────
