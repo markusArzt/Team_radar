@@ -361,27 +361,37 @@ function renderSubmit() {
 }
 
 async function doSubmit() {
-  const btn = document.getElementById('submit-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spinner"></span>Saving…';
-  try {
-    const entry = { _ts: Date.now() };
-    cfg.dims.forEach((d,i) => { entry[d] = parseInt(document.getElementById('sl-'+i).value); });
+  // Collect values before any async work
+  const entry = { _ts: Date.now() };
+  cfg.dims.forEach((d,i) => { entry[d] = parseInt(document.getElementById('sl-'+i).value); });
+
+  // Optimistic: show success instantly, sync in background
+  submitted = true;
+  renderSubmit();
+
+  // Update local cache optimistically so Results tab is fast too
+  const cached = LS.get('radar_cache') || { responses: [] };
+  cached.responses.push(entry);
+  cached._ts = Date.now();
+  LS.set('radar_cache', cached);
+
+  // Background sync with one retry
+  const sync = async () => {
     const current = await readBin();
     const responses = current.responses || [];
     responses.push(entry);
     await writeBin({ responses });
-    submitted = true;
-    renderSubmit();
+    LS.set('radar_cache', { responses, _ts: Date.now() });
+  };
+  try {
+    await sync();
   } catch(e) {
-    toast('Error saving — please try again');
-    btn.disabled = false;
-    btn.innerHTML = 'Submit my ratings';
+    try { await sync(); } catch(e2) { toast('Could not reach server — response saved locally'); }
   }
 }
 
 // ── Results ────────────────────────────────────────────────────────────────
-let resultsInterval = null;
+const CACHE_TTL = 20000; // 20s before background refresh
 
 async function renderResults() {
   const area = document.getElementById('results-area');
@@ -389,23 +399,39 @@ async function renderResults() {
     area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>`;
     return;
   }
-  area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>`;
-  try {
-    const data = await readBin();
-    const responses = data.responses || [];
-    renderResultsData(responses, area);
-  } catch(e) {
-    area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Could not load results.</div>`;
+
+  // Show cached data instantly if available
+  const cached = LS.get('radar_cache');
+  if (cached && cached.responses) {
+    renderResultsData(cached.responses, area, true);
+  } else {
+    area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>`;
+  }
+
+  // Always fetch fresh in background unless cache is very recent
+  const age = cached ? Date.now() - (cached._ts || 0) : Infinity;
+  if (age > CACHE_TTL) {
+    try {
+      const data = await readBin();
+      const responses = data.responses || [];
+      LS.set('radar_cache', { responses, _ts: Date.now() });
+      renderResultsData(responses, area, false);
+    } catch(e) {
+      if (!cached) {
+        area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Could not load results.</div>`;
+      } else {
+        toast('Could not refresh — showing cached results');
+      }
+    }
   }
 }
 
-function renderResultsData(responses, area) {
+function renderResultsData(responses, area, isStale) {
   const n = responses.length;
+  const staleNote = isStale ? ' · <span style="color:var(--text-faint)">refreshing…</span>' : '';
   if (!n) {
     area.innerHTML = `
-      <div class="refresh-bar"><span class="dot inactive"></span> Live — updates when you click refresh</div>
-      <div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">No responses yet.</div>
-      <button class="btn" style="display:block;margin:0 auto" onclick="renderResults()">Refresh</button>`;
+      <div class="refresh-bar"><span class="dot inactive"></span> No responses yet${staleNote} — <button onclick="renderResults()" style="background:none;border:none;color:var(--purple);cursor:pointer;font-size:12px;font-family:inherit">Refresh</button></div>`;
     return;
   }
   const sums = {}, counts = {};
@@ -428,7 +454,7 @@ function renderResultsData(responses, area) {
   }).join('');
 
   area.innerHTML = `
-    <div class="refresh-bar"><span class="dot"></span> ${n} response${n!==1?'s':''} — <button onclick="renderResults()" style="background:none;border:none;color:var(--purple);cursor:pointer;font-size:12px;font-family:inherit">Refresh</button></div>
+    <div class="refresh-bar"><span class="dot${isStale?' inactive':''}"></span> ${n} response${n!==1?'s':''}${staleNote} — <button onclick="renderResults()" style="background:none;border:none;color:var(--purple);cursor:pointer;font-size:12px;font-family:inherit">Refresh</button></div>
     <div class="summary">
       <div>
         <div class="big-num">${overall.toFixed(1)}<span style="font-size:16px;color:var(--text-faint)"> / ${cfg.maxVal}</span></div>
