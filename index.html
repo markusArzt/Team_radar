@@ -218,29 +218,27 @@ let myEntry     = null;
 
 // ═══════════════════════════════════════════════════════════════════
 // GOOGLE APPS SCRIPT API
-// GET  → returns { responses: [...] }
-// POST → appends one response entry; body is the entry object
-//        body { action:'clear' } wipes all responses
+// All requests use GET with query params to avoid CORS issues.
+// Apps Script handles GET cross-origin with no restrictions.
+//   ?action=read              → returns { ok:true, responses:[…] }
+//   ?action=write&data=<json> → appends one entry
+//   ?action=clear             → wipes all responses
 // ═══════════════════════════════════════════════════════════════════
-async function readBin() {
-  const r = await fetch(cfg.url);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.error || 'Script error');
-  return j; // { responses: [...] }
-}
-
-async function writeBin(entry) {
-  // entry is a single response object (or { action:'clear' })
-  const r = await fetch(cfg.url, {
-    method: 'POST',
-    body: JSON.stringify(entry)
-  });
-  // Apps Script redirects POST to a new URL — follow it
+async function appsScriptGet(params) {
+  const qs = Object.entries(params).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+  const r = await fetch(cfg.url + '?' + qs);
   if (!r.ok) throw new Error('HTTP ' + r.status);
   const j = await r.json();
   if (!j.ok) throw new Error(j.error || 'Script error');
   return j;
+}
+
+async function readBin() {
+  return appsScriptGet({ action: 'read' });
+}
+
+async function writeBin(entry) {
+  return appsScriptGet({ action: 'write', data: JSON.stringify(entry) });
 }
 
 // ═══════════════════════════════════════════════════════════════════
