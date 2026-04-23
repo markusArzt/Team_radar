@@ -151,6 +151,7 @@
         <select class="input" id="max-val"><option>5</option><option selected>10</option></select></div>
     </div>
     <button class="btn-primary" id="save-btn" onclick="saveSetup()">Save & generate QR →</button>
+    <button class="btn" id="init-btn" onclick="initBin()" style="width:100%;margin-top:0.75rem;display:block;text-align:center">Initialise bin (clear &amp; prepare for new session)</button>
   </div>
 
   <!-- QR -->
@@ -277,6 +278,20 @@ async function saveSetup() {
   btn.disabled = false; btn.innerHTML = 'Save & generate QR →';
 }
 
+async function initBin() {
+  cfg.binId  = document.getElementById('cfg-bin-id').value.trim();
+  cfg.apiKey = document.getElementById('cfg-api-key').value.trim();
+  if (!cfg.binId || !cfg.apiKey) { toast('Please enter Bin ID and API key first'); return; }
+  const btn = document.getElementById('init-btn');
+  btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>Initialising…';
+  try {
+    await writeBin({ responses: [] });
+    LS.del('radar_cache');
+    toast('Bin initialised — ready for submissions');
+  } catch(e) { toast('Could not reach bin — check credentials'); }
+  btn.disabled = false; btn.innerHTML = 'Initialise bin';
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // QR
 // ═══════════════════════════════════════════════════════════════════
@@ -331,9 +346,18 @@ function renderSubmit() {
       <div class="success-icon">✓</div>
       <h2>Response recorded</h2>
       <p>The facilitator can see results in the Results tab.</p>
-      <button class="btn" style="margin-top:1.5rem" id="btn-again">Submit another</button>
+      <div style="display:flex;flex-direction:column;gap:10px;margin-top:1.5rem">
+        <button class="btn-primary" style="margin-top:0" id="btn-show-result">Show my result vs team</button>
+        <button class="btn" style="text-align:center" id="btn-again">Submit another response</button>
+      </div>
     </div>`;
-    // Use addEventListener — never inline onclick — so state reset is reliable
+    document.getElementById('btn-show-result').addEventListener('click', () => {
+      if (myEntry) {
+        const cached = LS.get('radar_cache');
+        const avgs = cached ? calcAvgsFrom(cached.responses) : {};
+        showResultOverlay(myEntry, avgs);
+      }
+    });
     document.getElementById('btn-again').addEventListener('click', () => {
       submitState = 'idle';
       myEntry = null;
@@ -372,16 +396,14 @@ async function doSubmit() {
   submitState = 'syncing';
   renderSubmit();
 
-  let finalResponses = [entry];
+  // Use local cache as base — avoids slow readBin() on every submit.
+  // The bin is pre-initialised via "Initialise bin" in Setup.
+  const local = LS.get('radar_cache') || { responses: [] };
+  let finalResponses = [...local.responses, entry];
+  LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
   try {
-    const remote = await readBin();
-    finalResponses = [...(remote.responses || []), entry];
     await writeBin({ responses: finalResponses });
-    LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
   } catch(e) {
-    const local = LS.get('radar_cache') || { responses: [] };
-    finalResponses = [...local.responses, entry];
-    LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
     toast('Saved locally — could not reach server');
   }
 
