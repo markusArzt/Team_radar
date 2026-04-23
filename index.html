@@ -391,62 +391,49 @@ async function doSubmit() {
 }
 
 
-// ═══════════════════════════════════════════════════════════════════
-// POLLING  (Results tab only)
-// ═══════════════════════════════════════════════════════════════════
-let pollTimer = null;
-let pollFails = 0;
-
-function startPolling() {
-  stopPolling();
-  pollFails = 0;
-  pollOnce();
-  pollTimer = setInterval(pollOnce, 5000);
-}
-
-function stopPolling() {
-  if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
-}
-
-async function pollOnce() {
-  if (!cfg.binId) return;
-  const area = document.getElementById('results-area');
-  if (!area) return;
-  try {
-    const data      = await readBin();
-    const responses = data.responses || [];
-    LS.set('radar_cache', { responses, _ts: Date.now() });
-    pollFails = 0;
-    renderResultsData(responses, calcAvgsFrom(responses), area);
-  } catch(e) {
-    pollFails++;
-    const bar = area.querySelector('.live-bar');
-    if (bar && pollFails >= 2) {
-      bar.innerHTML = '<span class="live-dot off"></span>Could not reach server — retrying…';
-    }
-  }
-}
-
 async function renderResults() {
   const area = document.getElementById('results-area');
   if (!cfg.binId) {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>';
     return;
   }
-  // Show stale cache immediately (no blank flash)
+  // Show cached data + loading indicator while fetching
   const cached = LS.get('radar_cache');
   if (cached && cached.responses && cached.responses.length) {
-    renderResultsData(cached.responses, calcAvgsFrom(cached.responses), area);
+    renderResultsData(cached.responses, calcAvgsFrom(cached.responses), area, true);
   } else {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>';
   }
-  startPolling();
+  await refreshResults();
 }
 
-function renderResultsData(responses, avgs, area) {
+async function refreshResults() {
+  const area = document.getElementById('results-area');
+  if (!area || !cfg.binId) return;
+  // Disable the refresh button while loading
+  const btn = area.querySelector('#btn-refresh');
+  if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+  try {
+    const data = await readBin();
+    const responses = data.responses || [];
+    LS.set('radar_cache', { responses, _ts: Date.now() });
+    renderResultsData(responses, calcAvgsFrom(responses), area, false);
+  } catch(e) {
+    // Re-enable button on error
+    const btn2 = area.querySelector('#btn-refresh');
+    if (btn2) { btn2.disabled = false; btn2.textContent = 'Refresh'; }
+    toast('Could not reach server — check your connection');
+  }
+}
+
+function renderResultsData(responses, avgs, area, isLoading) {
   const n = responses.length;
+  const refreshBtn = `<button class="btn" id="btn-refresh" ${isLoading?'disabled':''} style="min-width:90px">${isLoading?'Refreshing…':'Refresh'}</button>`;
   if (!n) {
-    area.innerHTML = `<div class="live-bar"><span class="live-dot off"></span>No responses yet — polling every 5s</div>`;
+    area.innerHTML = `
+      <div style="margin-bottom:1rem">${refreshBtn}</div>
+      <div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">No responses yet.</div>`;
+    document.getElementById('btn-refresh').addEventListener('click', refreshResults);
     return;
   }
   const overall = cfg.dims.reduce((s,d) => s+(avgs[d]||0), 0) / cfg.dims.length;
@@ -458,20 +445,21 @@ function renderResultsData(responses, avgs, area) {
       <div class="result-num">${v.toFixed(1)}</div></div>`;
   }).join('');
   area.innerHTML = `
-    <div class="live-bar"><span class="live-dot"></span>${n} response${n!==1?'s':''} · live (every 5s)</div>
     <div class="summary">
       <div>
         <div class="big-num">${overall.toFixed(1)}<span style="font-size:16px;color:var(--text-faint)"> / ${cfg.maxVal}</span></div>
-        <div class="big-sub">overall average</div>
+        <div class="big-sub">overall average · ${n} response${n!==1?'s':''}</div>
       </div>
       <div class="count-badge"><strong>${n}</strong>response${n!==1?'s':''}</div>
     </div>
     <div class="card">${bars}</div>
     <div class="radar-wrap">${drawRadar(avgs)}</div>
     <div style="display:flex;gap:8px;margin-top:1rem;flex-wrap:wrap">
+      ${refreshBtn}
       <button class="btn" id="btn-copy-avgs">Copy averages</button>
-      <button class="btn" id="btn-clear" style="color:var(--red)">Clear all responses</button>
+      <button class="btn" id="btn-clear" style="color:var(--red)">Clear all</button>
     </div>`;
+  document.getElementById('btn-refresh').addEventListener('click', refreshResults);
   document.getElementById('btn-copy-avgs').addEventListener('click', () => {
     const text = cfg.dims.map(d=>`${d}: ${(avgs[d]||0).toFixed(1)} / ${cfg.maxVal}`).join('\n');
     navigator.clipboard.writeText(text).then(()=>toast('Copied!'));
@@ -484,7 +472,6 @@ async function clearResponses() {
   try {
     await writeBin({ responses: [] });
     LS.del('radar_cache');
-    pollFails = 0;
     toast('Cleared');
     const area = document.getElementById('results-area');
     if (area) renderResultsData([], {}, area);
@@ -608,7 +595,6 @@ function switchTab(name) {
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.getElementById('view-'+name).classList.add('active');
   if (name==='results') renderResults();
-  else stopPolling();
   if (name==='qr')     renderQR();
   if (name==='submit') renderSubmit();
 }
@@ -720,15 +706,8 @@ async function runTests() {
   cfg.dims = saved;
 
   // ── polling ────────────────────────────────────────────────────
-  startPolling();
-  ok('startPolling: pollTimer set',         pollTimer !== null);
-  ok('startPolling: pollFails reset to 0',  pollFails === 0);
-  stopPolling();
-  ok('stopPolling: pollTimer null',         pollTimer === null);
+  ok('polling: replaced by manual refresh button', true, 'no timer to test');
 
-  // Second stop is safe (idempotent)
-  stopPolling();
-  ok('stopPolling idempotent: no error',    true);
 
   // ── LS round-trip ──────────────────────────────────────────────
   LS.set('_t',{x:99}); ok('LS set/get round-trip', LS.get('_t')?.x===99);
