@@ -218,27 +218,47 @@ let myEntry     = null;
 
 // ═══════════════════════════════════════════════════════════════════
 // GOOGLE APPS SCRIPT API
-// All requests use GET with query params to avoid CORS issues.
-// Apps Script handles GET cross-origin with no restrictions.
-//   ?action=read              → returns { ok:true, responses:[…] }
-//   ?action=write&data=<json> → appends one entry
-//   ?action=clear             → wipes all responses
+// Apps Script returns a 302 redirect which blocks fetch() cross-origin.
+// We use JSONP instead — injects a <script> tag, Apps Script calls our
+// callback function with the data. Works with zero CORS issues.
 // ═══════════════════════════════════════════════════════════════════
-async function appsScriptGet(params) {
-  const qs = Object.entries(params).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
-  const r = await fetch(cfg.url + '?' + qs);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  const j = await r.json();
-  if (!j.ok) throw new Error(j.error || 'Script error');
-  return j;
+let _jsonpCounter = 0;
+
+function jsonpGet(params) {
+  return new Promise((resolve, reject) => {
+    const cbName = '__radar_cb_' + (++_jsonpCounter);
+    const timeout = setTimeout(() => {
+      delete window[cbName];
+      reject(new Error('Timeout'));
+    }, 10000);
+    window[cbName] = (data) => {
+      clearTimeout(timeout);
+      delete window[cbName];
+      document.getElementById('jsonp-' + cbName)?.remove();
+      if (!data.ok) reject(new Error(data.error || 'Script error'));
+      else resolve(data);
+    };
+    params.callback = cbName;
+    const qs = Object.entries(params).map(([k,v]) => k + '=' + encodeURIComponent(v)).join('&');
+    const s = document.createElement('script');
+    s.id = 'jsonp-' + cbName;
+    s.src = cfg.url + '?' + qs;
+    s.onerror = () => {
+      clearTimeout(timeout);
+      delete window[cbName];
+      s.remove();
+      reject(new Error('Script load failed'));
+    };
+    document.head.appendChild(s);
+  });
 }
 
 async function readBin() {
-  return appsScriptGet({ action: 'read' });
+  return jsonpGet({ action: 'read' });
 }
 
 async function writeBin(entry) {
-  return appsScriptGet({ action: 'write', data: JSON.stringify(entry) });
+  return jsonpGet({ action: 'write', data: JSON.stringify(entry) });
 }
 
 // ═══════════════════════════════════════════════════════════════════
