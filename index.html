@@ -412,36 +412,19 @@ async function doSubmit() {
   cfg.dims.forEach((d,i) => { entry[d] = parseInt(document.getElementById('sl-'+i).value); });
   myEntry = entry;
 
-  submitState = 'syncing';
-  renderSubmit();
-
-  // Append to local cache immediately
+  // Optimistic: update local cache and show success immediately
   const local = LS.get('radar_cache') || { responses: [] };
   const finalResponses = [...local.responses, entry];
   LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
-  try {
-    // POST just the single entry — Apps Script appends it server-side
-    await writeBin(entry);
-  } catch(e) {
-    toast('Saved locally — could not reach server');
-  }
 
-  showResultOverlay(entry, calcAvgsFrom(finalResponses));
   submitState = 'done';
   renderSubmit();
+  showResultOverlay(entry, calcAvgsFrom(finalResponses));
+
+  // Sync to server in background — user already sees success screen
+  writeBin(entry).catch(() => toast('Warning: could not sync to server'));
 }
 
-
-let pollTimer = null;
-
-function startPolling() {
-  stopPolling();
-  pollTimer = setInterval(refreshResults, 5000);
-}
-
-function stopPolling() {
-  if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
-}
 
 async function renderResults() {
   const area = document.getElementById('results-area');
@@ -449,15 +432,14 @@ async function renderResults() {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>';
     return;
   }
-  // Show cached data instantly while fetching
+  // Show cached data instantly, then fetch fresh in background
   const cached = LS.get('radar_cache');
   if (cached && cached.responses && cached.responses.length) {
-    renderResultsData(cached.responses, calcAvgsFrom(cached.responses), area, true);
+    renderResultsData(cached.responses, calcAvgsFrom(cached.responses), area, true, cached._ts);
   } else {
     area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>';
   }
   await refreshResults();
-  startPolling();
 }
 
 async function refreshResults() {
@@ -468,8 +450,9 @@ async function refreshResults() {
   try {
     const data = await readBin();
     const responses = data.responses || [];
-    LS.set('radar_cache', { responses, _ts: Date.now() });
-    renderResultsData(responses, calcAvgsFrom(responses), area, false);
+    const ts = Date.now();
+    LS.set('radar_cache', { responses, _ts: ts });
+    renderResultsData(responses, calcAvgsFrom(responses), area, false, ts);
   } catch(e) {
     const btn2 = area.querySelector('#btn-refresh');
     if (btn2) { btn2.disabled = false; btn2.textContent = 'Refresh'; }
@@ -477,12 +460,16 @@ async function refreshResults() {
   }
 }
 
-function renderResultsData(responses, avgs, area, isLoading) {
+function renderResultsData(responses, avgs, area, isLoading, ts) {
   const n = responses.length;
+  const timeStr = ts ? new Date(ts).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
   const refreshBtn = `<button class="btn" id="btn-refresh" ${isLoading?'disabled':''} style="min-width:90px">${isLoading?'Refreshing…':'Refresh'}</button>`;
   if (!n) {
     area.innerHTML = `
-      <div style="margin-bottom:1rem">${refreshBtn}</div>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:1rem">
+        ${refreshBtn}
+        ${timeStr ? `<span style="font-size:12px;color:var(--text-faint)">Updated ${timeStr}</span>` : ''}
+      </div>
       <div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">No responses yet.</div>`;
     document.getElementById('btn-refresh').addEventListener('click', refreshResults);
     return;
@@ -505,8 +492,9 @@ function renderResultsData(responses, avgs, area, isLoading) {
     </div>
     <div class="card">${bars}</div>
     <div class="radar-wrap">${drawRadar(avgs)}</div>
-    <div style="display:flex;gap:8px;margin-top:1rem;flex-wrap:wrap">
+    <div style="display:flex;gap:8px;margin-top:1rem;flex-wrap:wrap;align-items:center">
       ${refreshBtn}
+      ${timeStr ? `<span style="font-size:12px;color:var(--text-faint)">Updated ${timeStr}</span>` : ''}
       <button class="btn" id="btn-copy-avgs">Copy averages</button>
       <button class="btn" id="btn-clear" style="color:var(--red)">Clear all</button>
     </div>`;
@@ -707,7 +695,6 @@ function switchTab(name) {
   document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
   document.getElementById('view-'+name).classList.add('active');
   if (name==='results') renderResults();
-  else stopPolling();
   if (name==='qr')     renderQR();
   if (name==='submit') renderSubmit();
 }
