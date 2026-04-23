@@ -363,57 +363,44 @@ function renderSubmit() {
 }
 
 async function doSubmit() {
-  // Guard: only one submission can run at a time
   if (submitState !== 'idle') return;
 
-  // Snapshot slider values before any async / DOM change
   const entry = { _ts: Date.now() };
   cfg.dims.forEach((d,i) => { entry[d] = parseInt(document.getElementById('sl-'+i).value); });
   myEntry = entry;
 
-  // → syncing: re-render removes the button (prevents double-tap)
   submitState = 'syncing';
   renderSubmit();
 
-  // Optimistic local cache update (Results tab sees it instantly)
-  const localCache = LS.get('radar_cache') || { responses: [] };
-  const optimistic  = [...localCache.responses, entry];
-  LS.set('radar_cache', { responses: optimistic, _ts: Date.now() });
-
-  // Server sync: read → append → write, retry once
-  let finalResponses = optimistic;
-  let ok = false;
-  for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-    try {
-      if (attempt > 0) await sleep(1200);
-      const remote   = await readBin();
-      const updated  = [...(remote.responses || []), entry];
-      await writeBin({ responses: updated });
-      finalResponses = updated;
-      LS.set('radar_cache', { responses: updated, _ts: Date.now() });
-      ok = true;
-    } catch(e) { /* retry */ }
+  let finalResponses = [entry];
+  try {
+    const remote = await readBin();
+    finalResponses = [...(remote.responses || []), entry];
+    await writeBin({ responses: finalResponses });
+    LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
+  } catch(e) {
+    const local = LS.get('radar_cache') || { responses: [] };
+    finalResponses = [...local.responses, entry];
+    LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
+    toast('Saved locally — could not reach server');
   }
-  if (!ok) toast('Could not reach server — response saved locally');
 
-  // Show personal vs team overlay
   showResultOverlay(entry, calcAvgsFrom(finalResponses));
-
-  // → done
   submitState = 'done';
   renderSubmit();
 }
 
+
 // ═══════════════════════════════════════════════════════════════════
 // POLLING  (Results tab only)
 // ═══════════════════════════════════════════════════════════════════
-let pollTimer  = null;
-let knownCount = -1;
+let pollTimer = null;
+let pollFails = 0;
 
 function startPolling() {
   stopPolling();
-  knownCount = -1;    // force first poll to always render
-  pollOnce();         // immediate
+  pollFails = 0;
+  pollOnce();
   pollTimer = setInterval(pollOnce, 5000);
 }
 
@@ -423,32 +410,35 @@ function stopPolling() {
 
 async function pollOnce() {
   if (!cfg.binId) return;
+  const area = document.getElementById('results-area');
+  if (!area) return;
   try {
     const data      = await readBin();
     const responses = data.responses || [];
     LS.set('radar_cache', { responses, _ts: Date.now() });
-    // Always re-render when count changes
-    if (responses.length !== knownCount) {
-      knownCount = responses.length;
-      const area = document.getElementById('results-area');
-      if (area) renderResultsData(responses, calcAvgsFrom(responses), area);
+    pollFails = 0;
+    renderResultsData(responses, calcAvgsFrom(responses), area);
+  } catch(e) {
+    pollFails++;
+    const bar = area.querySelector('.live-bar');
+    if (bar && pollFails >= 2) {
+      bar.innerHTML = '<span class="live-dot off"></span>Could not reach server — retrying…';
     }
-  } catch(e) { /* keep showing current data on error */ }
+  }
 }
 
 async function renderResults() {
   const area = document.getElementById('results-area');
   if (!cfg.binId) {
-    area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>`;
+    area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted);font-size:14px">Complete Setup first.</div>';
     return;
   }
   // Show stale cache immediately (no blank flash)
   const cached = LS.get('radar_cache');
   if (cached && cached.responses && cached.responses.length) {
     renderResultsData(cached.responses, calcAvgsFrom(cached.responses), area);
-    knownCount = cached.responses.length;
   } else {
-    area.innerHTML = `<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>`;
+    area.innerHTML = '<div style="text-align:center;padding:2rem;color:var(--text-muted)">Loading…</div>';
   }
   startPolling();
 }
@@ -494,7 +484,7 @@ async function clearResponses() {
   try {
     await writeBin({ responses: [] });
     LS.del('radar_cache');
-    knownCount = -1;
+    pollFails = 0;
     toast('Cleared');
     const area = document.getElementById('results-area');
     if (area) renderResultsData([], {}, area);
@@ -732,7 +722,7 @@ async function runTests() {
   // ── polling ────────────────────────────────────────────────────
   startPolling();
   ok('startPolling: pollTimer set',         pollTimer !== null);
-  ok('startPolling: knownCount reset to -1', knownCount === -1);
+  ok('startPolling: pollFails reset to 0',  pollFails === 0);
   stopPolling();
   ok('stopPolling: pollTimer null',         pollTimer === null);
 
