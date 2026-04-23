@@ -127,6 +127,28 @@
   .refresh-bar { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-faint); margin-bottom: 1rem; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: #3B6D11; display: inline-block; }
   .dot.inactive { background: var(--text-faint); }
+
+  /* overlay */
+  .overlay-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 100; display: flex; align-items: flex-end; justify-content: center; animation: fadeIn 0.2s ease; }
+  @keyframes fadeIn { from { opacity:0; } to { opacity:1; } }
+  .overlay-sheet { background: var(--bg); border-radius: 20px 20px 0 0; width: 100%; max-width: 560px; max-height: 90vh; overflow-y: auto; padding: 1.5rem 1.25rem 2.5rem; animation: slideUp 0.25s ease; }
+  @keyframes slideUp { from { transform: translateY(40px); opacity:0; } to { transform: translateY(0); opacity:1; } }
+  .overlay-handle { width: 36px; height: 4px; background: var(--border-strong); border-radius: 2px; margin: 0 auto 1.25rem; }
+  .overlay-title { font-size: 17px; font-weight: 500; margin-bottom: 0.25rem; }
+  .overlay-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 1.25rem; }
+  .legend { display: flex; gap: 1rem; margin-bottom: 1rem; }
+  .legend-item { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-muted); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .compare-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
+  .compare-label { width: 110px; flex-shrink: 0; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .compare-bars { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+  .compare-bar { height: 6px; border-radius: 3px; transition: width 0.5s ease; }
+  .compare-nums { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; min-width: 28px; }
+  .compare-num { font-size: 11px; font-weight: 500; line-height: 1.4; }
+  .delta-badge { font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 500; }
+  .delta-pos { background: #EAF3DE; color: #3B6D11; }
+  .delta-neg { background: #FCEBEB; color: #A32D2D; }
+  .delta-neu { background: var(--bg-secondary); color: var(--text-faint); }
 </style>
 </head>
 <body>
@@ -205,6 +227,7 @@
   </div>
 </div>
 
+<div id="result-overlay" style="display:none"></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -221,6 +244,7 @@ let cfg = LS.get('radar_cfg') || {
 };
 
 let submitted = false;
+let myEntry = null; // store user's own response for overlay
 
 // ── JSONBin helpers ────────────────────────────────────────────────────────
 async function readBin() {
@@ -364,10 +388,14 @@ async function doSubmit() {
   // Collect values before any async work
   const entry = { _ts: Date.now() };
   cfg.dims.forEach((d,i) => { entry[d] = parseInt(document.getElementById('sl-'+i).value); });
+  myEntry = entry;
 
   // Optimistic: show success instantly, sync in background
   submitted = true;
   renderSubmit();
+
+  // Show overlay immediately with own scores; team averages load in background
+  showResultOverlay(entry, null);
 
   // Update local cache optimistically so Results tab is fast too
   const cached = LS.get('radar_cache') || { responses: [] };
@@ -382,6 +410,8 @@ async function doSubmit() {
     responses.push(entry);
     await writeBin({ responses });
     LS.set('radar_cache', { responses, _ts: Date.now() });
+    // Update overlay with real team averages now that we have them
+    showResultOverlay(entry, calcAvgsFrom(responses));
   };
   try {
     await sync();
@@ -470,7 +500,83 @@ function renderResultsData(responses, area, isStale) {
     </div>`;
 }
 
+function calcAvgsFrom(responses) {
+  if (!responses.length) return {};
+  const sums = {}, counts = {};
+  responses.forEach(r => {
+    cfg.dims.forEach(d => {
+      if (r[d] !== undefined) { sums[d] = (sums[d]||0)+r[d]; counts[d] = (counts[d]||0)+1; }
+    });
+  });
+  const avgs = {};
+  cfg.dims.forEach(d => { avgs[d] = sums[d] ? sums[d]/counts[d] : 0; });
+  return avgs;
+}
+
+function showResultOverlay(myE, teamAvgs) {
+  const el = document.getElementById('result-overlay');
+  const hasTeam = teamAvgs && Object.keys(teamAvgs).length > 0;
+
+  const myOverall = cfg.dims.reduce((s,d) => s+(myE[d]||0), 0) / cfg.dims.length;
+  const teamOverall = hasTeam ? cfg.dims.reduce((s,d) => s+(teamAvgs[d]||0), 0) / cfg.dims.length : null;
+
+  const compareRows = cfg.dims.map(d => {
+    const mine = myE[d] || 0;
+    const team = hasTeam ? (teamAvgs[d]||0) : null;
+    const myPct = (mine / cfg.maxVal) * 100;
+    const teamPct = team !== null ? (team / cfg.maxVal) * 100 : 0;
+    const delta = team !== null ? mine - team : 0;
+    const deltaLabel = team !== null
+      ? `<span class="delta-badge ${delta > 0.4 ? 'delta-pos' : delta < -0.4 ? 'delta-neg' : 'delta-neu'}">${delta > 0 ? '+' : ''}${delta.toFixed(1)}</span>`
+      : '';
+    return `<div class="compare-row">
+      <div class="compare-label" title="${d}">${d}</div>
+      <div class="compare-bars">
+        <div class="compare-bar" style="width:${myPct}%;background:#7F77DD"></div>
+        ${team !== null ? `<div class="compare-bar" style="width:${teamPct}%;background:#E8A838;opacity:0.8"></div>` : ''}
+      </div>
+      <div class="compare-nums">
+        <div class="compare-num" style="color:#7F77DD">${mine}</div>
+        ${team !== null ? `<div class="compare-num" style="color:#BA7517">${team.toFixed(1)}</div>` : ''}
+      </div>
+      ${deltaLabel}
+    </div>`;
+  }).join('');
+
+  const radarSvg = drawRadarDual(myE, teamAvgs);
+
+  const teamNote = hasTeam
+    ? `Your scores vs team average (${teamOverall !== null ? teamOverall.toFixed(1) : '–'} / ${cfg.maxVal})`
+    : `Your scores — loading team average…`;
+
+  el.innerHTML = `<div class="overlay-backdrop" onclick="closeOverlay(event)">
+    <div class="overlay-sheet" onclick="event.stopPropagation()">
+      <div class="overlay-handle"></div>
+      <div class="overlay-title">Your result</div>
+      <div class="overlay-sub">${teamNote}</div>
+      ${hasTeam ? `<div class="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#7F77DD"></div> You (${myOverall.toFixed(1)})</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#E8A838"></div> Team avg (${teamOverall.toFixed(1)})</div>
+      </div>` : `<div class="legend"><div class="legend-item"><div class="legend-dot" style="background:#7F77DD"></div> You (${myOverall.toFixed(1)})</div></div>`}
+      <div class="radar-wrap">${radarSvg}</div>
+      <div style="margin-top:1.25rem">${compareRows}</div>
+      <button class="btn-primary" style="margin-top:1.5rem" onclick="closeOverlay()">Close</button>
+    </div>
+  </div>`;
+  el.style.display = 'block';
+}
+
+function closeOverlay(e) {
+  if (e && e.target !== document.querySelector('.overlay-backdrop')) return;
+  document.getElementById('result-overlay').style.display = 'none';
+}
+
+
 function drawRadar(avgs) {
+  return drawRadarDual(avgs, null);
+}
+
+function drawRadarDual(myAvgs, teamAvgs) {
   const dims = cfg.dims, n = dims.length;
   if (n < 3) return '';
   const cx=160, cy=160, r=120;
@@ -488,14 +594,22 @@ function drawRadar(avgs) {
     const s = d.length>13?d.slice(0,12)+'…':d;
     return `<text x="${lx}" y="${ly+4}" text-anchor="${anc}" font-size="12" fill="#888" font-family="-apple-system,sans-serif">${s}</text>`;
   }).join('');
-  const dataPts = dims.map((_,i) => pt(i,avgs[dims[i]]||0).join(',')).join(' ');
-  const dots = dims.map((_,i) => { const [x,y]=pt(i,avgs[dims[i]]||0); return `<circle cx="${x}" cy="${y}" r="4" fill="#7F77DD"/>`; }).join('');
-  return `<svg viewBox="0 0 320 320" width="100%" style="max-width:320px" role="img" aria-label="Radar chart">
+  const myPts = dims.map((_,i) => pt(i,myAvgs[dims[i]]||0).join(',')).join(' ');
+  const myDots = dims.map((_,i) => { const [x,y]=pt(i,myAvgs[dims[i]]||0); return `<circle cx="${x}" cy="${y}" r="4" fill="#7F77DD"/>`; }).join('');
+  let teamPolygon = '';
+  if (teamAvgs && Object.keys(teamAvgs).length) {
+    const teamPts = dims.map((_,i) => pt(i,teamAvgs[dims[i]]||0).join(',')).join(' ');
+    const teamDots = dims.map((_,i) => { const [x,y]=pt(i,teamAvgs[dims[i]]||0); return `<circle cx="${x}" cy="${y}" r="3.5" fill="#E8A838"/>`; }).join('');
+    teamPolygon = `<polygon points="${teamPts}" fill="#E8A838" fill-opacity="0.15" stroke="#E8A838" stroke-width="1.5" stroke-dasharray="5,3"/>${teamDots}`;
+  }
+  return `<svg viewBox="0 0 320 320" width="100%" style="max-width:300px" role="img" aria-label="Radar chart">
     ${rings}${axes}${labels}
-    <polygon points="${dataPts}" fill="#7F77DD" fill-opacity="0.18" stroke="#7F77DD" stroke-width="2"/>
-    ${dots}
+    ${teamPolygon}
+    <polygon points="${myPts}" fill="#7F77DD" fill-opacity="0.18" stroke="#7F77DD" stroke-width="2"/>
+    ${myDots}
   </svg>`;
 }
+
 
 function copyAverages(avgs) {
   const text = cfg.dims.map(d => `${d}: ${(avgs[d]||0).toFixed(1)} / ${cfg.maxVal}`).join('\n');
