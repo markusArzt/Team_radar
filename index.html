@@ -258,6 +258,12 @@ async function readBin() {
 }
 
 async function writeBin(entry) {
+  if (entry && entry.action === 'clear') {
+    return jsonpGet({ action: 'clear' });
+  }
+  if (entry && entry.action === 'updateByToken') {
+    return jsonpGet({ action: 'updateByToken', token: entry.token, data: JSON.stringify(entry.entry) });
+  }
   return jsonpGet({ action: 'write', data: JSON.stringify(entry) });
 }
 
@@ -385,44 +391,72 @@ function renderSubmit() {
     return;
   }
 
-  // idle: form
+  // idle: check if participant has a prior response to pre-fill
+  const local = LS.get('radar_cache') || { responses: [] };
+  const prior = isParticipant ? local.responses.find(r => r._token === participantToken) : null;
   const mid = Math.round(cfg.maxVal / 2);
-  const sliders = cfg.dims.map((d,i) => `
+  const sliders = cfg.dims.map((d,i) => {
+    const val = prior ? (prior[d] || mid) : mid;
+    return `
     <div class="slider-row">
       <div class="slider-header">
         <span class="slider-label">${d}</span>
-        <span class="slider-val" id="sv-${i}">${mid}</span>
+        <span class="slider-val" id="sv-${i}">${val}</span>
       </div>
-      <input type="range" min="1" max="${cfg.maxVal}" value="${mid}" step="1"
+      <input type="range" min="1" max="${cfg.maxVal}" value="${val}" step="1"
         oninput="document.getElementById('sv-${i}').textContent=this.value" id="sl-${i}">
       <div class="slider-scale"><span>${cfg.minLabel}</span><span>${cfg.maxLabel}</span></div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+  const editNotice = prior
+    ? `<div class="edit-notice">✏️ You already submitted — adjust your scores and resubmit to update them.</div>`
+    : '';
+  const header = isParticipant
+    ? `<div class="participant-header">
+        <div class="participant-title">Team Radar</div>
+        <div class="participant-sub">Rate your team on each dimension</div>
+      </div>`
+    : '';
   area.innerHTML = `
+    ${header}
+    ${editNotice}
     <div class="card">
       <div class="section-label" style="margin-bottom:1rem">Rate your team</div>${sliders}
     </div>
-    <button class="btn-primary" id="btn-submit">Submit my ratings</button>`;
+    <button class="btn-primary" id="btn-submit">${prior ? 'Update my ratings' : 'Submit my ratings'}</button>`;
   document.getElementById('btn-submit').addEventListener('click', doSubmit);
 }
 
 async function doSubmit() {
   if (submitState !== 'idle') return;
 
-  const entry = { _ts: Date.now() };
+  const entry = { _ts: Date.now(), _token: participantToken };
   cfg.dims.forEach((d,i) => { entry[d] = parseInt(document.getElementById('sl-'+i).value); });
   myEntry = entry;
 
-  // Optimistic: update local cache and show success immediately
+  // Optimistic: update local cache
   const local = LS.get('radar_cache') || { responses: [] };
-  const finalResponses = [...local.responses, entry];
+  let finalResponses;
+  const isEdit = isParticipant && local.responses.some(r => r._token === participantToken);
+  if (isEdit) {
+    // Replace existing response with same token
+    finalResponses = local.responses.map(r => r._token === participantToken ? entry : r);
+  } else {
+    finalResponses = [...local.responses, entry];
+  }
   LS.set('radar_cache', { responses: finalResponses, _ts: Date.now() });
 
   submitState = 'done';
   renderSubmit();
   showResultOverlay(entry, calcAvgsFrom(finalResponses));
 
-  // Sync to server in background — user already sees success screen
-  writeBin(entry).catch(() => toast('Warning: could not sync to server'));
+  // Sync to server in background
+  if (isEdit) {
+    writeBin({ action: 'updateByToken', token: participantToken, entry })
+      .catch(() => toast('Warning: could not sync to server'));
+  } else {
+    writeBin(entry).catch(() => toast('Warning: could not sync to server'));
+  }
 }
 
 
@@ -511,7 +545,9 @@ async function clearResponses() {
   try {
     await writeBin({ action: 'clear' });
     LS.del('radar_cache');
-    toast('Cleared');
+    // Note: participant tokens remain in their own browsers.
+    // On next submission they will add a fresh response.
+    toast('Cleared — participants can now submit again');
     const area = document.getElementById('results-area');
     if (area) renderResultsData([], {}, area, false);
   } catch(e) { toast('Error clearing — try again'); }
@@ -712,7 +748,21 @@ function bootstrapFromUrl() {
     cfg.maxVal   = p.get('maxval') ? parseInt(p.get('maxval'))         : cfg.maxVal;
     LS.set('radar_cfg', cfg);
   }
-  if (p.get('tab')) switchTab(p.get('tab'));
+  // Participant mode: arriving via QR code (?tab=submit in URL)
+  if (p.get('tab') === 'submit') {
+    isParticipant = true;
+    // Assign a persistent token for this participant
+    participantToken = LS.get('radar_participant_token');
+    if (!participantToken) {
+      participantToken = 'p_' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      LS.set('radar_participant_token', participantToken);
+    }
+    // Participant sees only the submit view — no tabs
+    document.querySelector('.tabs').style.display = 'none';
+    switchTab('submit');
+  } else if (p.get('tab')) {
+    switchTab(p.get('tab'));
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
