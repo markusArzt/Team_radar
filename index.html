@@ -370,10 +370,9 @@ function renderSubmit() {
     area.innerHTML = `<div class="success">
       <div class="success-icon">✓</div>
       <h2>Response recorded</h2>
-      <p>The facilitator can see results in the Results tab.</p>
+      <p>${isParticipant ? 'Your score has been saved.' : 'The facilitator can see results in the Results tab.'}</p>
       <div style="display:flex;flex-direction:column;gap:10px;margin-top:1.5rem">
         <button class="btn-primary" style="margin-top:0" id="btn-show-result">Show my result vs team</button>
-        <button class="btn" style="text-align:center" id="btn-again">Submit another response</button>
       </div>
     </div>`;
     document.getElementById('btn-show-result').addEventListener('click', () => {
@@ -382,11 +381,6 @@ function renderSubmit() {
         const avgs = cached ? calcAvgsFrom(cached.responses) : {};
         showResultOverlay(myEntry, avgs);
       }
-    });
-    document.getElementById('btn-again').addEventListener('click', () => {
-      submitState = 'idle';
-      myEntry = null;
-      renderSubmit();
     });
     return;
   }
