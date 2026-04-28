@@ -596,11 +596,25 @@ function showResultOverlay(myE, teamAvgs) {
         <button class="btn" id="btn-overlay-refresh" style="flex:1">Refresh team avg</button>
         <button class="btn-primary" style="margin-top:0;flex:1" id="btn-close-overlay">Close</button>
       </div>
+      <div id="btn-update-response-wrap" style="display:none;margin-top:10px">
+        <button class="btn" style="width:100%;text-align:center" id="btn-update-response">Update response</button>
+      </div>
     </div></div>`;
   el.style.display = 'block';
   document.getElementById('btn-close-overlay').addEventListener('click', closeOverlay);
   document.getElementById('overlay-bg').addEventListener('click', e => { if(e.target===e.currentTarget) closeOverlay(); });
   document.getElementById('btn-overlay-refresh').addEventListener('click', () => refreshOverlay(myE));
+  // Show "Update response" button for everyone after first submit
+  const updateWrap = document.getElementById('btn-update-response-wrap');
+  if (updateWrap && submitState === 'done') {
+    updateWrap.style.display = 'block';
+    document.getElementById('btn-update-response').addEventListener('click', () => {
+      closeOverlay();
+      submitState = 'idle';
+      myEntry = null;
+      renderSubmit();
+    });
+  }
 }
 
 async function refreshOverlay(myE) {
